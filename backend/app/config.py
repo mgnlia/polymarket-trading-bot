@@ -1,6 +1,6 @@
 """Configuration with environment variable support."""
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, List
 
 
 class Settings(BaseSettings):
@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # Strategy config
     arb_threshold: float = 0.02   # 2% mispricing to trigger arb
-    mm_spread_min: float = 0.03   # 3¢ minimum spread for MM
+    mm_spread_min: float = 0.03   # 3c minimum spread for MM
     mm_order_size: float = 5.0    # USDC per MM order
     momentum_threshold: float = 0.60  # >60% confidence for momentum trade
     max_position_size: float = 50.0   # Max USDC per position
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     db_url: str = "sqlite+aiosqlite:///./data/polymarket.db"
 
     # CORS
-    cors_origins: list[str] = ["*"]
+    cors_origins: List[str] = ["*"]
 
     class Config:
         env_file = ".env"
