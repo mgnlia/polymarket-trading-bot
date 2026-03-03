@@ -5,9 +5,7 @@ Earns the spread when both sides fill.
 Optimized for airdrop: high volume, many markets, liquidity provision.
 """
 import logging
-import random
 from dataclasses import dataclass, field
-from typing import Optional
 from datetime import datetime
 
 from ..config import settings
@@ -41,7 +39,6 @@ class MarketMakerStrategy:
     """
     Two-sided market making on Polymarket.
     Posts limit orders at bid and ask, capturing the spread.
-    
     Airdrop benefit: creates volume + liquidity on many markets.
     """
 
@@ -50,29 +47,23 @@ class MarketMakerStrategy:
         self.order_size = settings.mm_order_size
         self.stats = MMStats()
         self.name = "market_maker"
-        self.active_quotes: dict[str, MMQuote] = {}
         logger.info(f"[MM] Initialized: min_spread={self.min_spread:.2%} size=${self.order_size}")
 
     def scan(self, markets: list[dict]) -> list[MMQuote]:
-        """Find markets suitable for market making."""
         quotes = []
-
         for m in markets:
             yes = m.get("yes_price", 0.5)
             no = m.get("no_price", 0.5)
             spread = m.get("spread", abs(1.0 - yes - no))
             volume = m.get("volume", 0)
 
-            # Need minimum spread to be profitable after fees
             if spread < self.min_spread:
                 continue
-
-            # Prefer markets with decent volume (active markets)
             if volume < 1000:
                 continue
 
             mid = (yes + no) / 2
-            half_spread = spread / 2 * 0.8  # Quote inside the spread
+            half_spread = spread / 2 * 0.8
 
             quote = MMQuote(
                 market_id=m["condition_id"],
@@ -92,7 +83,6 @@ class MarketMakerStrategy:
         return quotes
 
     def generate_orders(self, quote: MMQuote) -> list[dict]:
-        """Generate bid + ask limit orders for a quote."""
         return [
             {
                 "market_id": quote.market_id,
@@ -115,11 +105,6 @@ class MarketMakerStrategy:
                 "expected_spread": quote.expected_spread,
             },
         ]
-
-    def estimate_pnl(self, quote: MMQuote, fill_rate: float = 0.6) -> float:
-        """Estimate P&L from a quote assuming fill_rate of both sides."""
-        spread_captured = quote.expected_spread * quote.size
-        return spread_captured * fill_rate
 
     def record_fill(self, spread: float):
         self.stats.fills += 1
