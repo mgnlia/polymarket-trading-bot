@@ -10,7 +10,6 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-# In-memory market cache
 _markets: list[dict] = []
 _last_refresh: Optional[datetime] = None
 _CACHE_TTL = timedelta(seconds=settings.market_refresh_interval)
@@ -47,7 +46,7 @@ def _sim_markets(n: int = 60) -> list[dict]:
         yes = round(random.uniform(0.1, 0.9), 3)
         no = round(random.uniform(0.05, min(0.95, 1 - yes + 0.15)), 3)
         spread = round(abs(1.0 - yes - no) + random.uniform(0, 0.05), 3)
-        arb = (yes + no) < 0.97  # arbitrage if sum < 0.97
+        arb = (yes + no) < 0.97
         markets.append({
             "condition_id": f"0x{''.join(random.choices('0123456789abcdef', k=40))}",
             "question": questions[i % len(questions)] + (f" (#{i+1})" if i >= len(questions) else ""),
@@ -117,7 +116,6 @@ async def refresh_markets(force: bool = False) -> list[dict]:
             _markets = live
             logger.info(f"[Scanner] Fetched {len(_markets)} live markets from Gamma API")
         else:
-            # Fall back to simulation if API fails
             _markets = _sim_markets(60)
             logger.warning("[Scanner] Using simulated markets (API fallback)")
 
@@ -135,25 +133,3 @@ def get_arb_opportunities() -> list[dict]:
 
 def get_mm_candidates(min_spread: float = 0.03) -> list[dict]:
     return [m for m in _markets if m.get("spread", 0) >= min_spread]
-
-
-async def get_orderbook(token_id: str) -> dict:
-    """Get orderbook for a token (simulated or live)."""
-    if settings.simulation_mode:
-        mid = random.uniform(0.3, 0.7)
-        spread = random.uniform(0.01, 0.05)
-        return {
-            "bids": [{"price": round(mid - spread/2 - i*0.01, 3), "size": round(random.uniform(10, 100), 1)} for i in range(5)],
-            "asks": [{"price": round(mid + spread/2 + i*0.01, 3), "size": round(random.uniform(10, 100), 1)} for i in range(5)],
-            "mid": mid,
-            "spread": spread,
-        }
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        try:
-            r = await client.get(f"{settings.clob_api_url}/book", params={"token_id": token_id})
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            logger.warning(f"Orderbook fetch failed for {token_id}: {e}")
-            return {}
