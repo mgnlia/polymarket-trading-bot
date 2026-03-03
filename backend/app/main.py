@@ -166,11 +166,3 @@ async def _status_generator() -> AsyncGenerator[dict, None]:
 async def stream_status():
     """SSE endpoint for real-time bot status updates."""
     return EventSourceResponse(_status_generator())
-
-
-# ─── Docs redirect ───────────────────────────────────────────────────────────
-
-@app.get("/docs-redirect")
-async def docs_redirect():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/docs")
