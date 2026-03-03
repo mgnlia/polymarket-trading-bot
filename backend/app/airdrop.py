@@ -31,66 +31,47 @@ class AirdropMetrics:
 class AirdropOptimizer:
     """
     Tracks and scores airdrop eligibility.
-    
-    Polymarket airdrop criteria (estimated):
-    - Volume: more = better (target $10k+)
-    - Diversity: 50+ different markets
-    - Profitability: positive P&L preferred
-    - Liquidity: limit orders > market orders
+    Polymarket airdrop criteria: volume, diversity, profitability, liquidity.
     """
 
     def __init__(self):
         self.metrics = AirdropMetrics()
         self.volume_target = settings.volume_target
         self.markets_target = settings.markets_target
-        logger.info(
-            f"[Airdrop] Targets: volume=${self.volume_target:,.0f} "
-            f"markets={self.markets_target}"
-        )
+        logger.info(f"[Airdrop] Targets: volume=${self.volume_target:,.0f} markets={self.markets_target}")
 
     def record_trade(self, market_id: str, volume: float, pnl: float, order_type: str = "LIMIT"):
-        """Record a completed trade for airdrop tracking."""
         self.metrics.total_volume += volume
         self.metrics.markets_traded.add(market_id)
         self.metrics.total_trades += 1
         self.metrics.total_pnl += pnl
-
         if pnl > 0:
             self.metrics.profitable_trades += 1
-
         if order_type == "LIMIT":
             self.metrics.limit_orders += 1
         else:
             self.metrics.market_orders += 1
-
         self.metrics.last_updated = datetime.utcnow().isoformat()
 
     def score_diversity(self) -> float:
-        """Score 0-100 based on market diversity."""
-        count = len(self.metrics.markets_traded)
-        return min(100.0, (count / self.markets_target) * 100)
+        return min(100.0, (len(self.metrics.markets_traded) / self.markets_target) * 100)
 
     def score_volume(self) -> float:
-        """Score 0-100 based on trading volume."""
         return min(100.0, (self.metrics.total_volume / self.volume_target) * 100)
 
     def score_profitability(self) -> float:
-        """Score 0-100 based on win rate."""
         if self.metrics.total_trades == 0:
             return 0.0
         win_rate = self.metrics.profitable_trades / self.metrics.total_trades
-        return min(100.0, win_rate * 100 * 1.5)  # 67% win rate = 100 score
+        return min(100.0, win_rate * 100 * 1.5)
 
     def score_liquidity(self) -> float:
-        """Score 0-100 based on limit order ratio."""
         total = self.metrics.limit_orders + self.metrics.market_orders
         if total == 0:
             return 0.0
-        limit_ratio = self.metrics.limit_orders / total
-        return min(100.0, limit_ratio * 100 * 1.2)  # 83% limit = 100 score
+        return min(100.0, (self.metrics.limit_orders / total) * 100 * 1.2)
 
     def overall_score(self) -> float:
-        """Weighted overall airdrop score."""
         return (
             self.score_diversity() * 0.30 +
             self.score_volume() * 0.30 +
@@ -100,17 +81,12 @@ class AirdropOptimizer:
 
     def get_tier(self) -> str:
         score = self.overall_score()
-        if score >= 80:
-            return "Diamond"
-        elif score >= 60:
-            return "Gold"
-        elif score >= 40:
-            return "Silver"
-        else:
-            return "Bronze"
+        if score >= 80: return "Diamond"
+        elif score >= 60: return "Gold"
+        elif score >= 40: return "Silver"
+        else: return "Bronze"
 
     def get_report(self) -> dict:
-        """Full airdrop status report."""
         return {
             "scores": {
                 "diversity": round(self.score_diversity(), 1),
@@ -128,9 +104,7 @@ class AirdropOptimizer:
                 "limit_orders": self.metrics.limit_orders,
                 "market_orders": self.metrics.market_orders,
                 "total_pnl": round(self.metrics.total_pnl, 4),
-                "win_rate": round(
-                    self.metrics.profitable_trades / max(1, self.metrics.total_trades) * 100, 1
-                ),
+                "win_rate": round(self.metrics.profitable_trades / max(1, self.metrics.total_trades) * 100, 1),
                 "last_updated": self.metrics.last_updated,
             },
             "targets": {
