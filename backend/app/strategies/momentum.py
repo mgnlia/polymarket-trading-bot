@@ -1,8 +1,6 @@
 """
 Momentum / Sentiment Strategy
 Uses price momentum and simulated news sentiment to take directional bets.
-In live mode: monitors price changes over time, news feeds.
-In sim mode: generates realistic momentum signals.
 """
 import logging
 import random
@@ -19,7 +17,7 @@ logger = logging.getLogger(__name__)
 class MomentumSignal:
     market_id: str
     question: str
-    direction: str  # "YES" or "NO"
+    direction: str
     price: float
     confidence: float
     reason: str
@@ -39,12 +37,7 @@ class MomentumStats:
 class MomentumStrategy:
     """
     Momentum and sentiment-driven directional trading.
-    
-    Signal sources:
-    1. Price momentum: price moving consistently in one direction
-    2. Volume spike: unusual volume = informed trading
-    3. Sentiment: simulated news/social signal (real: integrate news API)
-    4. Probability extremes: markets at <10% or >90% may revert
+    Signal sources: price momentum, volume spikes, keyword sentiment.
     """
 
     def __init__(self):
@@ -55,7 +48,6 @@ class MomentumStrategy:
         logger.info(f"[Momentum] Initialized with confidence threshold={self.threshold:.0%}")
 
     def update_price(self, market_id: str, price: float):
-        """Track price history for momentum calculation."""
         if market_id not in self._price_history:
             self._price_history[market_id] = []
         hist = self._price_history[market_id]
@@ -64,11 +56,9 @@ class MomentumStrategy:
             hist.pop(0)
 
     def _calc_momentum(self, market_id: str) -> float:
-        """Calculate price momentum score (-1 to +1)."""
         hist = self._price_history.get(market_id, [])
         if len(hist) < 3:
             return 0.0
-        # Simple linear regression slope
         n = len(hist)
         x_mean = (n - 1) / 2
         y_mean = sum(hist) / n
@@ -77,51 +67,31 @@ class MomentumStrategy:
         return num / den if den > 0 else 0.0
 
     def _sim_sentiment(self, question: str) -> tuple[float, str]:
-        """Simulate news sentiment for a market question (replace with real NLP)."""
-        # Keywords that suggest bullish sentiment for YES
         bullish_keywords = ["win", "rise", "increase", "approve", "launch", "exceed", "gain"]
         bearish_keywords = ["fall", "decline", "reject", "fail", "lose", "cut", "ban"]
-
         q_lower = question.lower()
         bullish = sum(1 for kw in bullish_keywords if kw in q_lower)
         bearish = sum(1 for kw in bearish_keywords if kw in q_lower)
-
-        # Add random noise for simulation
         noise = random.uniform(-0.2, 0.2)
         if bullish > bearish:
             score = min(0.9, 0.55 + (bullish - bearish) * 0.1 + noise)
-            return score, f"Bullish keywords detected ({bullish} signals)"
+            return score, f"Bullish keywords ({bullish} signals)"
         elif bearish > bullish:
             score = max(0.1, 0.45 - (bearish - bullish) * 0.1 + noise)
-            return score, f"Bearish keywords detected ({bearish} signals)"
+            return score, f"Bearish keywords ({bearish} signals)"
         else:
-            score = 0.5 + noise
-            return score, "Neutral sentiment"
+            return 0.5 + noise, "Neutral sentiment"
 
     def scan(self, markets: list[dict]) -> list[MomentumSignal]:
-        """Generate momentum signals for markets."""
         signals = []
-
         for m in markets:
             yes = m.get("yes_price", 0.5)
             question = m.get("question", "")
             market_id = m["condition_id"]
 
-            # Update price history
             self.update_price(market_id, yes)
-            momentum = self._calc_momentum(market_id)
-
-            # Sentiment signal
             sentiment_score, reason = self._sim_sentiment(question)
 
-            # Combine: momentum + sentiment
-            combined_confidence = (abs(momentum) * 10 + abs(sentiment_score - 0.5) * 2) / 3
-
-            # Only trade high-confidence signals
-            if combined_confidence < (self.threshold - 0.5) and not settings.simulation_mode:
-                continue
-
-            # Determine direction
             if sentiment_score > 0.60 and yes < 0.70:
                 direction = "YES"
                 confidence = sentiment_score
@@ -148,16 +118,12 @@ class MomentumStrategy:
                 size=round(size, 2),
             )
             signals.append(signal)
-            logger.info(
-                f"[Momentum] 📈 Signal: {question[:40]} → {direction} "
-                f"@ {price:.3f} conf={confidence:.2f} ({reason})"
-            )
+            logger.info(f"[Momentum] Signal: {question[:40]} → {direction} @ {price:.3f} conf={confidence:.2f}")
 
         self.stats.signals_generated += len(signals)
         return signals
 
     def generate_order(self, signal: MomentumSignal) -> dict:
-        """Generate a market/limit order for a momentum signal."""
         return {
             "market_id": signal.market_id,
             "question": signal.question,
