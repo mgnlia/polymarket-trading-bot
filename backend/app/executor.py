@@ -35,7 +35,6 @@ class SimulatedFill:
 class OrderExecutor:
     """
     Executes orders either in simulation or via py-clob-client.
-    Tracks fill stats for airdrop optimization.
     """
 
     def __init__(self):
@@ -44,7 +43,6 @@ class OrderExecutor:
         self._fills = 0
         self._orders = 0
         self._total_volume = 0.0
-        self.name = "executor"
 
         if not settings.simulation_mode:
             self._init_live_client()
@@ -52,7 +50,6 @@ class OrderExecutor:
             logger.info("[Executor] Running in SIMULATION mode")
 
     def _init_live_client(self):
-        """Initialize py-clob-client for live trading."""
         try:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds
@@ -74,16 +71,12 @@ class OrderExecutor:
             settings.simulation_mode = True
 
     async def place_order(self, order: dict) -> dict:
-        """Place a single order."""
         self._orders += 1
-
         if settings.simulation_mode:
             return await self._sim_order(order)
-        else:
-            return await self._live_order(order)
+        return await self._live_order(order)
 
     async def _sim_order(self, order: dict) -> dict:
-        """Simulate order execution."""
         filled = self.sim.should_fill(order.get("order_type", "LIMIT"))
         fill_price = self.sim.fill_price(order["price"], order["side"])
 
@@ -91,14 +84,7 @@ class OrderExecutor:
             self._fills += 1
             volume = order["size"] * fill_price
             self._total_volume += volume
-
-            # Simulate P&L
             pnl = self._calc_sim_pnl(order, fill_price)
-
-            logger.debug(
-                f"[Executor][SIM] FILLED {order['side']} {order['size']:.2f} "
-                f"@ {fill_price:.4f} ({order['strategy']}) pnl={pnl:+.4f}"
-            )
 
             return {
                 "order_id": f"sim_{uuid.uuid4().hex[:12]}",
@@ -114,7 +100,6 @@ class OrderExecutor:
                 "strategy": order["strategy"],
             }
         else:
-            logger.debug(f"[Executor][SIM] NOT FILLED {order['side']} @ {order['price']:.4f}")
             return {
                 "order_id": f"sim_{uuid.uuid4().hex[:12]}",
                 "status": "pending",
@@ -130,35 +115,27 @@ class OrderExecutor:
             }
 
     def _calc_sim_pnl(self, order: dict, fill_price: float) -> float:
-        """Simulate realistic P&L based on strategy."""
         strategy = order.get("strategy", "")
         size = order["size"]
 
         if strategy == "arbitrage":
-            # Arb: expected edge is the profit
             edge = order.get("expected_edge", 2.0) / 100
             return round(size * edge * random.uniform(0.5, 1.2), 4)
-
         elif strategy == "market_maker":
-            # MM: earn half the spread per side
             spread = order.get("expected_spread", 0.03)
             return round(size * spread * 0.5 * random.uniform(0.3, 1.0), 4)
-
         elif strategy == "momentum":
-            # Momentum: binary outcome weighted by confidence
             confidence = order.get("confidence", 0.6)
             win = random.random() < confidence
             if win:
                 return round(size * random.uniform(0.05, 0.30), 4)
             else:
                 return round(-size * random.uniform(0.02, 0.15), 4)
-
         return round(random.uniform(-0.01, 0.05) * size, 4)
 
     async def _live_order(self, order: dict) -> dict:
-        """Place a live order via py-clob-client."""
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.clob_types import OrderArgs
 
             order_args = OrderArgs(
                 token_id=order["market_id"],
@@ -192,10 +169,6 @@ class OrderExecutor:
         if self._orders == 0:
             return 0.0
         return (self._fills / self._orders) * 100
-
-    @property
-    def total_volume(self) -> float:
-        return self._total_volume
 
     def get_stats(self) -> dict:
         return {
