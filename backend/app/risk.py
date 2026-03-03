@@ -42,7 +42,7 @@ class RiskManager:
     def _check_daily_reset(self):
         today = date.today()
         if self.state.last_reset < today:
-            logger.info("[Risk] Daily reset — clearing P&L and volume counters")
+            logger.info("[Risk] Daily reset")
             self.state.daily_pnl = 0.0
             self.state.daily_volume = 0.0
             self.state.last_reset = today
@@ -51,23 +51,17 @@ class RiskManager:
                 self.state.halt_reason = None
 
     def can_trade(self, order_size: float) -> tuple[bool, str]:
-        """Check if a trade is allowed under current risk limits."""
         self._check_daily_reset()
-
         if self.state.halted:
             return False, f"Trading halted: {self.state.halt_reason}"
-
         if self.state.open_positions >= self.max_positions:
             return False, f"Max positions reached ({self.max_positions})"
-
         if order_size > self.max_position_size:
             return False, f"Order size ${order_size} exceeds max ${self.max_position_size}"
-
         if self.state.daily_pnl < -self.daily_loss_limit:
             self.state.halted = True
             self.state.halt_reason = f"daily loss limit ${self.daily_loss_limit} hit"
             return False, f"Daily loss limit hit: ${self.state.daily_pnl:.2f}"
-
         return True, "ok"
 
     def record_order_open(self, size: float):
@@ -79,13 +73,12 @@ class RiskManager:
         self.state.total_exposure = max(0, self.state.total_exposure - size)
         self.state.daily_pnl += pnl
         self.state.daily_volume += volume
-
         if self.state.daily_pnl < -self.daily_loss_limit:
             self.state.halted = True
             self.state.halt_reason = f"daily loss limit ${self.daily_loss_limit} hit"
-            logger.warning(f"[Risk] ⛔ HALT: daily P&L = ${self.state.daily_pnl:.2f}")
+            logger.warning(f"[Risk] HALT: daily P&L = ${self.state.daily_pnl:.2f}")
 
-    def get_state(self) -> dict:
+    def get_status(self) -> dict:
         self._check_daily_reset()
         return {
             "open_positions": self.state.open_positions,
