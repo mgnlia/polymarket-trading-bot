@@ -30,6 +30,9 @@ jobs:
         run: ruff check .
       - name: Tests
         run: pytest tests/ -v --tb=short
+        env:
+          PYTHONPATH: .
+          SIMULATION_MODE: "true"
 
   frontend:
     runs-on: ubuntu-latest
