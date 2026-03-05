@@ -38,7 +38,7 @@ class ArbSignal:
 def scan_arb_opportunities(markets: list[dict], risk: RiskManager) -> list[ArbSignal]:
     """Scan markets for YES+NO sum deviations and simulate execution."""
     signals: list[ArbSignal] = []
-    threshold = settings.ARB_THRESHOLD_PCT + (2 * TAKER_FEE)
+    threshold = settings.arb_threshold + (2 * TAKER_FEE)
 
     for m in markets:
         prices = m.get("outcomePrices", [])
@@ -57,13 +57,15 @@ def scan_arb_opportunities(markets: list[dict], risk: RiskManager) -> list[ArbSi
 
         # Kelly sizing based on estimated win probability
         win_prob = min(0.85, 0.5 + deviation * 5)  # higher deviation = more confident
-        size = risk.kelly_bet_size(win_prob, win_payout=deviation, loss_payout=1.0)
+        size = risk.kelly_size(win_prob=win_prob, win_pct=deviation, loss_pct=TAKER_FEE * 2)
         if size < 0.50:
             continue
 
-        market_id = m.get("id", "unknown")
-        if not risk.can_open_position(market_id, size):
+        can_trade, _ = risk.can_trade(size)
+        if not can_trade:
             continue
+
+        market_id = m.get("id", "unknown")
 
         # --- Realistic execution simulation ---
         # Slippage: Gaussian noise (can make arb unprofitable)
@@ -79,9 +81,8 @@ def scan_arb_opportunities(markets: list[dict], risk: RiskManager) -> list[ArbSi
         # Actual PnL includes slippage and fees — CAN BE NEGATIVE
         actual_pnl = raw_profit - fee_cost - (slippage * effective_size)
 
-        executed = True
-        risk.record_position(market_id, effective_size if side == "buy_yes" else -effective_size)
-        risk.update_equity(actual_pnl)
+        risk.record_order_open(effective_size)
+        risk.record_order_close(effective_size, pnl=actual_pnl, volume=effective_size)
 
         signals.append(
             ArbSignal(
@@ -94,7 +95,7 @@ def scan_arb_opportunities(markets: list[dict], risk: RiskManager) -> list[ArbSi
                 size_usd=round(effective_size, 2),
                 expected_pnl=round(raw_profit, 4),
                 actual_pnl=round(actual_pnl, 4),
-                executed=executed,
+                executed=True,
             )
         )
 
