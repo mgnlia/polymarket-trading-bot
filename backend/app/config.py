@@ -1,10 +1,19 @@
 """Configuration with environment variable support."""
-from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from __future__ import annotations
+
+import json
+from pydantic import computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional, List
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
     # API Keys
     private_key: Optional[str] = None
     api_key: Optional[str] = None
@@ -45,28 +54,17 @@ class Settings(BaseSettings):
     # DB
     db_url: str = "sqlite+aiosqlite:///./data/polymarket.db"
 
-    # CORS — accepts JSON list or comma-separated string
-    cors_origins: List[str] = ["*"]
+    # CORS — stored as raw string, parsed via computed_field
+    # Accepts JSON list ("[\"*\"]") or comma-separated ("http://a,http://b") or single value ("*")
+    cors_origins_raw: str = "*"
 
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, v):
-        if isinstance(v, list):
-            return v
-        if isinstance(v, str):
-            v = v.strip()
-            # Try JSON first
-            if v.startswith("["):
-                import json
-                return json.loads(v)
-            # Comma-separated
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        extra = "ignore"
+    @computed_field  # type: ignore[misc]
+    @property
+    def cors_origins(self) -> List[str]:
+        v = self.cors_origins_raw.strip()
+        if v.startswith("["):
+            return json.loads(v)
+        return [x.strip() for x in v.split(",") if x.strip()]
 
 
 settings = Settings()
