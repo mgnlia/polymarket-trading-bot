@@ -1,113 +1,101 @@
 """
-Arbitrage Strategy
-Detects YES+NO mispricing: if YES + NO < 1 - threshold, both can be bought for profit.
+Arbitrage strategy — YES + NO price deviation scanner.
+
+Detects when YES_price + NO_price deviates from 1.0 by more than
+the threshold (default 2%) plus estimated taker fee.
+
+PnL can be NEGATIVE due to:
+- Slippage: simulated via Gaussian noise on fill price
+- Partial fills: not all arb legs may execute at expected price
+- Fee drag: taker fee eats into thin arb margins
 """
-import logging
+from __future__ import annotations
+
 import random
-from dataclasses import dataclass, field
-from typing import Optional
-from datetime import datetime
+from dataclasses import dataclass
 
 from ..config import settings
+from ..risk import RiskManager
 
-logger = logging.getLogger(__name__)
+
+TAKER_FEE = 0.005  # 0.5% per side
 
 
 @dataclass
 class ArbSignal:
     market_id: str
-    question: str
+    market_question: str
     yes_price: float
     no_price: float
-    edge: float
-    strategy: str = "arbitrage"
-    confidence: float = 0.0
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    deviation: float
+    side: str  # "buy_yes" or "buy_no"
+    size_usd: float
+    expected_pnl: float
+    actual_pnl: float
+    executed: bool
 
 
-@dataclass
-class ArbStats:
-    signals_generated: int = 0
-    trades_executed: int = 0
-    total_profit: float = 0.0
-    last_signal: Optional[str] = None
+def scan_arb_opportunities(markets: list[dict], risk: RiskManager) -> list[ArbSignal]:
+    """Scan markets for YES+NO sum deviations and simulate execution."""
+    signals: list[ArbSignal] = []
+    threshold = settings.ARB_THRESHOLD_PCT + (2 * TAKER_FEE)
 
+    for m in markets:
+        prices = m.get("outcomePrices", [])
+        if len(prices) < 2:
+            continue
+        yes_p = float(prices[0])
+        no_p = float(prices[1])
+        total = yes_p + no_p
+        deviation = abs(total - 1.0)
 
-class ArbitrageStrategy:
-    """
-    Detects arbitrage opportunities in prediction markets.
-    Core idea: In a binary market, YES + NO should sum to ~1.0.
-    If YES + NO < 0.97, buying both sides guarantees profit.
-    """
+        if deviation < threshold:
+            continue
 
-    def __init__(self):
-        self.threshold = settings.arb_threshold
-        self.stats = ArbStats()
-        self.name = "arbitrage"
-        logger.info(f"[Arbitrage] Initialized with threshold={self.threshold:.2%}")
+        # Determine side: if sum > 1, sell both (short); if sum < 1, buy both
+        side = "buy_yes" if total < 1.0 else "buy_no"
 
-    def scan(self, markets: list[dict]) -> list[ArbSignal]:
-        signals = []
-        for m in markets:
-            yes = m.get("yes_price", 0.5)
-            no = m.get("no_price", 0.5)
-            total = yes + no
+        # Kelly sizing based on estimated win probability
+        win_prob = min(0.85, 0.5 + deviation * 5)  # higher deviation = more confident
+        size = risk.kelly_bet_size(win_prob, win_payout=deviation, loss_payout=1.0)
+        if size < 0.50:
+            continue
 
-            if total < (1.0 - self.threshold):
-                edge = (1.0 - total) * 100
-                confidence = min(0.99, (1.0 - total) / 0.15)
-                signal = ArbSignal(
-                    market_id=m["condition_id"],
-                    question=m.get("question", ""),
-                    yes_price=yes,
-                    no_price=no,
-                    edge=edge,
-                    confidence=confidence,
-                )
-                signals.append(signal)
-                logger.info(f"[Arbitrage] ARB signal: {m.get('question', '')[:50]} YES={yes:.3f} NO={no:.3f} edge={edge:.2f}%")
+        market_id = m.get("id", "unknown")
+        if not risk.can_open_position(market_id, size):
+            continue
 
-            elif yes < 0.15 and no < 0.80:
-                edge = (0.15 - yes) * 100
-                if edge > self.threshold * 100:
-                    signals.append(ArbSignal(
-                        market_id=m["condition_id"],
-                        question=m.get("question", ""),
-                        yes_price=yes,
-                        no_price=no,
-                        edge=edge,
-                        confidence=0.6,
-                    ))
+        # --- Realistic execution simulation ---
+        # Slippage: Gaussian noise (can make arb unprofitable)
+        slippage = random.gauss(0, 0.008)  # mean=0, std=0.8%
+        # Fee cost both sides
+        fee_cost = size * 2 * TAKER_FEE
+        # Partial fill probability
+        fill_rate = random.uniform(0.6, 1.0)
+        effective_size = size * fill_rate
 
-        self.stats.signals_generated += len(signals)
-        if signals:
-            self.stats.last_signal = signals[-1].timestamp
-        return signals
+        # Raw arb profit = deviation * effective_size
+        raw_profit = deviation * effective_size
+        # Actual PnL includes slippage and fees — CAN BE NEGATIVE
+        actual_pnl = raw_profit - fee_cost - (slippage * effective_size)
 
-    def generate_orders(self, signal: ArbSignal, position_size: float = None) -> list[dict]:
-        size = min(position_size or settings.mm_order_size, settings.max_position_size)
-        orders = []
-        for side, price in [("BUY", signal.yes_price), ("BUY", signal.no_price)]:
-            orders.append({
-                "market_id": signal.market_id,
-                "question": signal.question,
-                "side": side,
-                "price": price,
-                "size": size / 2,
-                "order_type": "LIMIT",
-                "strategy": "arbitrage",
-                "expected_edge": signal.edge,
-            })
-        return orders
+        executed = True
+        risk.record_position(market_id, effective_size if side == "buy_yes" else -effective_size)
+        risk.update_equity(actual_pnl)
 
-    def record_trade(self, pnl: float):
-        self.stats.trades_executed += 1
-        self.stats.total_profit += pnl
+        signals.append(
+            ArbSignal(
+                market_id=market_id,
+                market_question=m.get("question", ""),
+                yes_price=yes_p,
+                no_price=no_p,
+                deviation=deviation,
+                side=side,
+                size_usd=round(effective_size, 2),
+                expected_pnl=round(raw_profit, 4),
+                actual_pnl=round(actual_pnl, 4),
+                executed=executed,
+            )
+        )
 
-    def get_stats(self) -> dict:
-        return {
-            "signals_generated": self.stats.signals_generated,
-            "trades_executed": self.stats.trades_executed,
-            "total_profit": round(self.stats.total_profit, 4),
-            "last_signal": self.stats.last_signal,
-        }
+    return signals

@@ -1,158 +1,107 @@
 """
-Momentum / Sentiment Strategy
-Uses price momentum and simulated news sentiment to take directional bets.
+Momentum strategy — price movement + volume spike signals.
+
+Enters when price moves beyond entry threshold with volume confirmation.
+Exits when price reversal exceeds exit threshold.
+
+PnL can be NEGATIVE: momentum can reverse (whipsaw), slippage on
+entry/exit, and false breakouts eat capital.
 """
-import logging
+from __future__ import annotations
+
 import random
-from dataclasses import dataclass, field
-from typing import Optional
-from datetime import datetime
+from dataclasses import dataclass
 
 from ..config import settings
-
-logger = logging.getLogger(__name__)
+from ..risk import RiskManager
 
 
 @dataclass
 class MomentumSignal:
     market_id: str
-    question: str
-    direction: str
-    price: float
-    confidence: float
-    reason: str
-    size: float
-    strategy: str = "momentum"
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    market_question: str
+    direction: str  # "long" or "short"
+    entry_price: float
+    current_price: float
+    price_change_pct: float
+    volume_spike: bool
+    size_usd: float
+    pnl: float
+    action: str  # "entry" or "exit" or "hold"
 
 
-@dataclass
-class MomentumStats:
-    signals_generated: int = 0
-    trades_executed: int = 0
-    correct_calls: int = 0
-    total_profit: float = 0.0
+def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]:
+    """Scan for momentum signals and simulate entries/exits."""
+    signals: list[MomentumSignal] = []
 
+    for m in markets:
+        prices = m.get("outcomePrices", [])
+        if len(prices) < 2:
+            continue
 
-class MomentumStrategy:
-    """
-    Momentum and sentiment-driven directional trading.
-    Signal sources: price momentum, volume spikes, keyword sentiment.
-    """
+        current_price = float(prices[0])
+        market_id = m.get("id", "unknown")
+        volume = float(m.get("volume", 0))
 
-    def __init__(self):
-        self.threshold = settings.momentum_threshold
-        self.stats = MomentumStats()
-        self.name = "momentum"
-        self._price_history: dict[str, list[float]] = {}
-        logger.info(f"[Momentum] Initialized with confidence threshold={self.threshold:.0%}")
+        # Simulate recent price change (in real mode would compare to historical)
+        price_change = random.gauss(0, 0.06)  # mean=0, std=6%
+        volume_spike = volume > 200000 or random.random() < 0.3
 
-    def update_price(self, market_id: str, price: float):
-        if market_id not in self._price_history:
-            self._price_history[market_id] = []
-        hist = self._price_history[market_id]
-        hist.append(price)
-        if len(hist) > 20:
-            hist.pop(0)
+        abs_change = abs(price_change)
 
-    def _calc_momentum(self, market_id: str) -> float:
-        hist = self._price_history.get(market_id, [])
-        if len(hist) < 3:
-            return 0.0
-        n = len(hist)
-        x_mean = (n - 1) / 2
-        y_mean = sum(hist) / n
-        num = sum((i - x_mean) * (hist[i] - y_mean) for i in range(n))
-        den = sum((i - x_mean) ** 2 for i in range(n))
-        return num / den if den > 0 else 0.0
+        if abs_change < settings.MOMENTUM_ENTRY_THRESHOLD:
+            continue
 
-    def _sim_sentiment(self, question: str) -> tuple[float, str]:
-        bullish_keywords = ["win", "rise", "increase", "approve", "launch", "exceed", "gain"]
-        bearish_keywords = ["fall", "decline", "reject", "fail", "lose", "cut", "ban"]
-        q_lower = question.lower()
-        bullish = sum(1 for kw in bullish_keywords if kw in q_lower)
-        bearish = sum(1 for kw in bearish_keywords if kw in q_lower)
-        noise = random.uniform(-0.2, 0.2)
-        if bullish > bearish:
-            score = min(0.9, 0.55 + (bullish - bearish) * 0.1 + noise)
-            return score, f"Bullish keywords ({bullish} signals)"
-        elif bearish > bullish:
-            score = max(0.1, 0.45 - (bearish - bullish) * 0.1 + noise)
-            return score, f"Bearish keywords ({bearish} signals)"
+        if not volume_spike:
+            continue
+
+        direction = "long" if price_change > 0 else "short"
+
+        # Kelly sizing: higher conviction for stronger moves
+        win_prob = min(0.65, 0.45 + abs_change * 2)
+        size = risk.kelly_bet_size(win_prob, win_payout=abs_change * 3, loss_payout=1.0)
+        if size < 0.50:
+            continue
+
+        if not risk.can_open_position(market_id, size):
+            continue
+
+        # Simulate trade outcome — momentum can REVERSE (whipsaw)
+        # True continuation probability decreases with move size (mean reversion)
+        continuation_prob = max(0.3, 0.6 - abs_change)
+        continues = random.random() < continuation_prob
+
+        entry_slippage = abs(random.gauss(0, 0.005))
+        entry_price = current_price + (entry_slippage if direction == "long" else -entry_slippage)
+
+        if continues:
+            # Momentum continues — profit with noise
+            exit_move = abs(random.gauss(abs_change * 0.5, abs_change * 0.3))
+            pnl = exit_move * size
         else:
-            return 0.5 + noise, "Neutral sentiment"
+            # Whipsaw / reversal — LOSS
+            reversal = abs(random.gauss(abs_change * 0.4, abs_change * 0.5))
+            pnl = -(reversal * size + entry_slippage * size)
 
-    def scan(self, markets: list[dict]) -> list[MomentumSignal]:
-        signals = []
-        for m in markets:
-            yes = m.get("yes_price", 0.5)
-            question = m.get("question", "")
-            market_id = m["condition_id"]
+        # Transaction costs
+        pnl -= size * 0.005  # taker fee
 
-            self.update_price(market_id, yes)
-            sentiment_score, reason = self._sim_sentiment(question)
+        risk.record_position(market_id, size if direction == "long" else -size)
+        risk.update_equity(pnl)
 
-            if sentiment_score > 0.60 and yes < 0.70:
-                direction = "YES"
-                confidence = sentiment_score
-                price = yes
-                size = min(settings.mm_order_size * confidence, settings.max_position_size * 0.5)
-            elif sentiment_score < 0.40 and yes > 0.30:
-                direction = "NO"
-                confidence = 1 - sentiment_score
-                price = 1 - yes
-                size = min(settings.mm_order_size * confidence, settings.max_position_size * 0.5)
-            else:
-                continue
-
-            if confidence < self.threshold - 0.05:
-                continue
-
-            signal = MomentumSignal(
+        signals.append(
+            MomentumSignal(
                 market_id=market_id,
-                question=question,
+                market_question=m.get("question", ""),
                 direction=direction,
-                price=price,
-                confidence=confidence,
-                reason=reason,
-                size=round(size, 2),
+                entry_price=round(entry_price, 4),
+                current_price=round(current_price, 4),
+                price_change_pct=round(price_change * 100, 2),
+                volume_spike=volume_spike,
+                size_usd=round(size, 2),
+                pnl=round(pnl, 4),
+                action="entry",
             )
-            signals.append(signal)
-            logger.info(f"[Momentum] Signal: {question[:40]} → {direction} @ {price:.3f} conf={confidence:.2f}")
+        )
 
-        self.stats.signals_generated += len(signals)
-        return signals
-
-    def generate_order(self, signal: MomentumSignal) -> dict:
-        return {
-            "market_id": signal.market_id,
-            "question": signal.question,
-            "side": "BUY",
-            "price": signal.price,
-            "size": signal.size,
-            "order_type": "LIMIT",
-            "strategy": "momentum",
-            "direction": signal.direction,
-            "confidence": signal.confidence,
-            "reason": signal.reason,
-        }
-
-    def record_trade(self, correct: bool, pnl: float):
-        self.stats.trades_executed += 1
-        if correct:
-            self.stats.correct_calls += 1
-        self.stats.total_profit += pnl
-
-    def get_win_rate(self) -> float:
-        if self.stats.trades_executed == 0:
-            return 0.0
-        return self.stats.correct_calls / self.stats.trades_executed
-
-    def get_stats(self) -> dict:
-        return {
-            "signals_generated": self.stats.signals_generated,
-            "trades_executed": self.stats.trades_executed,
-            "correct_calls": self.stats.correct_calls,
-            "win_rate": round(self.get_win_rate(), 4),
-            "total_profit": round(self.stats.total_profit, 4),
-        }
+    return signals

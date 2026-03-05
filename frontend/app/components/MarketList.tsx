@@ -1,9 +1,11 @@
 interface Market {
-  condition_id: string
+  condition_id?: string
+  id?: string
   question: string
   yes_price: number
   no_price: number
-  volume: number
+  volume?: number
+  volume_24h?: number
   spread: number
   arb_opportunity?: boolean
   category?: string
@@ -15,7 +17,7 @@ export default function MarketList({ markets }: { markets: Market[] }) {
     return (
       <div className="card text-center py-12">
         <span className="text-4xl mb-3 block">🔍</span>
-        <p className="text-poly-muted text-sm">No markets loaded. Click "Scan Markets" to fetch live markets.</p>
+        <p className="text-poly-muted text-sm">No markets loaded. Click &quot;Scan Markets&quot; to fetch live markets.</p>
       </div>
     )
   }
@@ -28,6 +30,7 @@ export default function MarketList({ markets }: { markets: Market[] }) {
           <thead>
             <tr className="border-b border-poly-border text-poly-muted">
               <th className="text-left py-2 pr-3">Question</th>
+              <th className="text-left py-2 pr-3">Category</th>
               <th className="text-right py-2 pr-3">YES</th>
               <th className="text-right py-2 pr-3">NO</th>
               <th className="text-right py-2 pr-3">Spread</th>
@@ -36,31 +39,36 @@ export default function MarketList({ markets }: { markets: Market[] }) {
             </tr>
           </thead>
           <tbody>
-            {markets.map((m) => (
-              <tr key={m.condition_id} className="border-b border-poly-border/50 hover:bg-poly-card/50">
-                <td className="py-2 pr-3 text-poly-text max-w-[280px] truncate">{m.question}</td>
-                <td className="py-2 pr-3 text-right text-green-400 font-medium">
-                  {(m.yes_price * 100).toFixed(1)}¢
-                </td>
-                <td className="py-2 pr-3 text-right text-red-400 font-medium">
-                  {(m.no_price * 100).toFixed(1)}¢
-                </td>
-                <td className={`py-2 pr-3 text-right font-medium ${m.spread > 0.05 ? 'text-yellow-400' : 'text-poly-muted'}`}>
-                  {(m.spread * 100).toFixed(1)}¢
-                </td>
-                <td className="py-2 pr-3 text-right text-poly-muted">
-                  ${(m.volume || 0).toLocaleString()}
-                </td>
-                <td className="py-2 flex gap-1 flex-wrap">
-                  {m.arb_opportunity && (
-                    <span className="badge-green">ARB</span>
-                  )}
-                  {m.spread > 0.03 && (
-                    <span className="badge-blue">MM</span>
-                  )}
-                </td>
-              </tr>
-            ))}
+            {markets.map((m, i) => {
+              const key = m.condition_id || m.id || String(i)
+              const vol = m.volume_24h ?? m.volume ?? 0
+              return (
+                <tr key={key} className="border-b border-poly-border/50 hover:bg-poly-card/50">
+                  <td className="py-2 pr-3 text-poly-text max-w-[260px] truncate">{m.question}</td>
+                  <td className="py-2 pr-3 text-poly-muted capitalize">{m.category || '—'}</td>
+                  <td className="py-2 pr-3 text-right text-green-400 font-medium">
+                    {(m.yes_price * 100).toFixed(1)}¢
+                  </td>
+                  <td className="py-2 pr-3 text-right text-red-400 font-medium">
+                    {(m.no_price * 100).toFixed(1)}¢
+                  </td>
+                  <td className={`py-2 pr-3 text-right font-medium ${m.spread > 0.05 ? 'text-yellow-400' : 'text-poly-muted'}`}>
+                    {(m.spread * 100).toFixed(1)}¢
+                  </td>
+                  <td className="py-2 pr-3 text-right text-poly-muted">
+                    ${vol.toLocaleString()}
+                  </td>
+                  <td className="py-2 flex gap-1 flex-wrap">
+                    {m.arb_opportunity && (
+                      <span className="badge-green">ARB</span>
+                    )}
+                    {m.spread > 0.03 && (
+                      <span className="badge-blue">MM</span>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </div>

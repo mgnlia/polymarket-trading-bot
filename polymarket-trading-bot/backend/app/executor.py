@@ -1,9 +1,6 @@
 """
 Order Executor
 Handles order placement — simulation or live via py-clob-client.
-
-Simulation PnL is realistic: strategies can and do lose money.
-Market Maker tracks inventory (net position) per market for paired fill logic.
 """
 import logging
 import random
@@ -16,73 +13,12 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 
-class MMInventory:
-    """
-    Tracks market-maker net inventory per market.
-    Paired fill logic: bid and ask fills are matched against each other.
-    Unhedged directional exposure is tracked and factored into PnL.
-    """
-
-    def __init__(self):
-        # market_id -> net position (positive = long YES, negative = long NO)
-        self._positions: dict[str, float] = {}
-        # market_id -> average entry price
-        self._avg_prices: dict[str, float] = {}
-
-    def record_fill(self, market_id: str, side: str, size: float, price: float) -> float:
-        """
-        Record a fill and return realized PnL from any paired (closing) fill.
-        BUY = going long YES, SELL = going long NO (reducing long or adding short).
-        """
-        current_pos = self._positions.get(market_id, 0.0)
-        current_avg = self._avg_prices.get(market_id, 0.0)
-        realized_pnl = 0.0
-
-        if side == "BUY":
-            delta = size
-        else:
-            delta = -size
-
-        new_pos = current_pos + delta
-
-        if current_pos != 0 and (current_pos > 0) != (delta > 0):
-            # Closing (or partially closing) a position — realize PnL
-            closing_size = min(abs(current_pos), abs(delta))
-            if current_pos > 0:
-                realized_pnl = closing_size * (price - current_avg)
-            else:
-                realized_pnl = closing_size * (current_avg - price)
-
-        # Update average price for remaining position
-        if new_pos == 0:
-            self._avg_prices.pop(market_id, None)
-            self._positions[market_id] = 0.0
-        elif abs(new_pos) > abs(current_pos):
-            # Adding to position — update average
-            total_cost = abs(current_pos) * current_avg + abs(delta) * price
-            self._avg_prices[market_id] = total_cost / abs(new_pos)
-            self._positions[market_id] = new_pos
-        else:
-            # Reducing position — avg price unchanged
-            self._positions[market_id] = new_pos
-
-        return round(realized_pnl, 6)
-
-    def get_exposure(self, market_id: str) -> dict:
-        pos = self._positions.get(market_id, 0.0)
-        avg = self._avg_prices.get(market_id, 0.0)
-        return {"market_id": market_id, "net_position": round(pos, 4), "avg_price": round(avg, 4)}
-
-    def total_exposure(self) -> float:
-        return sum(abs(v) for v in self._positions.values())
-
-
 class SimulatedFill:
-    """Simulates order fills with realistic behavior including losses."""
+    """Simulates order fills with realistic behavior."""
 
     def __init__(self):
-        self.fill_rate = 0.72       # 72% of limit orders fill in sim
-        self.slippage_bps = 5       # 5 bps average slippage
+        self.fill_rate = 0.72  # 72% of limit orders fill in sim
+        self.slippage_bps = 5  # 5 bps average slippage
 
     def should_fill(self, order_type: str) -> bool:
         if order_type == "MARKET":
@@ -92,8 +28,8 @@ class SimulatedFill:
     def fill_price(self, price: float, side: str) -> float:
         slippage = price * self.slippage_bps / 10000
         if side == "BUY":
-            return min(1.0, price + slippage)
-        return max(0.0, price - slippage)
+            return price + slippage
+        return price - slippage
 
 
 class OrderExecutor:
@@ -103,7 +39,6 @@ class OrderExecutor:
 
     def __init__(self):
         self.sim = SimulatedFill()
-        self.mm_inventory = MMInventory()
         self.client = None
         self._fills = 0
         self._orders = 0
@@ -180,49 +115,23 @@ class OrderExecutor:
             }
 
     def _calc_sim_pnl(self, order: dict, fill_price: float) -> float:
-        """
-        Realistic PnL simulation — all strategies can generate losses.
-        Market maker uses inventory tracking for paired fill logic.
-        """
         strategy = order.get("strategy", "")
         size = order["size"]
 
         if strategy == "arbitrage":
-            # Arb: edge exists but execution risk and adverse selection can flip it
             edge = order.get("expected_edge", 2.0) / 100
-            # 70% of the time edge is captured, 30% adverse selection eats it
-            if random.random() < 0.70:
-                return round(size * edge * random.uniform(0.3, 1.0), 4)
-            else:
-                return round(-size * edge * random.uniform(0.1, 0.5), 4)
-
+            return round(size * edge * random.uniform(0.5, 1.2), 4)
         elif strategy == "market_maker":
-            # MM uses inventory tracking — paired fill logic
-            market_id = order["market_id"]
-            realized = self.mm_inventory.record_fill(market_id, order["side"], size, fill_price)
-            # Add spread income if this closes a position (realized > 0)
-            # Add inventory risk (adverse price move) if opening position
-            if realized != 0:
-                return round(realized, 4)
-            # Opening position — inventory risk: market can move against us
             spread = order.get("expected_spread", 0.03)
-            inventory_risk = random.gauss(0, spread * 0.8)  # Normally distributed, mean 0
-            return round(size * inventory_risk * 0.5, 4)
-
+            return round(size * spread * 0.5 * random.uniform(0.3, 1.0), 4)
         elif strategy == "momentum":
             confidence = order.get("confidence", 0.6)
             win = random.random() < confidence
             if win:
                 return round(size * random.uniform(0.05, 0.30), 4)
             else:
-                return round(-size * random.uniform(0.02, 0.20), 4)
-
-        elif strategy in ("diversity", "anti_sybil"):
-            # Small positions, low win rate, mostly breakeven
-            outcome = random.gauss(0.005, 0.04)  # Mean slightly positive, noisy
-            return round(size * outcome, 4)
-
-        return round(random.gauss(0, 0.02) * size, 4)
+                return round(-size * random.uniform(0.02, 0.15), 4)
+        return round(random.uniform(-0.01, 0.05) * size, 4)
 
     async def _live_order(self, order: dict) -> dict:
         try:
@@ -267,5 +176,4 @@ class OrderExecutor:
             "fills": self._fills,
             "fill_rate": round(self.fill_rate, 2),
             "total_volume": round(self._total_volume, 2),
-            "mm_inventory_exposure": round(self.mm_inventory.total_exposure(), 4),
         }

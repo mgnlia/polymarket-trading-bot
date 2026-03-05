@@ -5,10 +5,13 @@ Uses secrets.compare_digest to prevent timing attacks.
 import secrets
 import logging
 from fastapi import Request, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+_security = HTTPBearer(auto_error=False)
 
 
 def _get_token_from_request(request: Request) -> str | None:

@@ -1,121 +1,151 @@
 """
-Market Maker Strategy
-Posts two-sided limit orders (bid + ask) around the mid price.
-Earns the spread when both sides fill.
-Optimized for airdrop: high volume, many markets, liquidity provision.
+Market Maker strategy — bid/ask spread provisioning.
+
+Tracks net inventory per market and manages inventory risk.
+Pairs bid and ask fills on both sides of the book.
+
+PnL can be NEGATIVE due to:
+- Adverse selection (informed traders pick off stale quotes)
+- Inventory risk (net position moves against us)
+- Slippage on rebalancing trades
 """
-import logging
+from __future__ import annotations
+
+import random
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from ..config import settings
-
-logger = logging.getLogger(__name__)
+from ..risk import RiskManager
 
 
 @dataclass
-class MMQuote:
+class MMInventory:
+    """Track market maker inventory per market."""
+
     market_id: str
-    question: str
+    net_position: float = 0.0  # positive = long, negative = short
+    total_bought: float = 0.0
+    total_sold: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    avg_buy_price: float = 0.0
+    avg_sell_price: float = 0.0
+    fills: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class MMSignal:
+    market_id: str
+    market_question: str
     bid_price: float
     ask_price: float
-    size: float
-    mid_price: float
-    expected_spread: float
-    strategy: str = "market_maker"
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    spread: float
+    bid_filled: bool
+    ask_filled: bool
+    fill_size: float
+    pnl: float
+    inventory_after: float
 
 
-@dataclass
-class MMStats:
-    quotes_posted: int = 0
-    orders_placed: int = 0
-    fills: int = 0
-    spread_captured: float = 0.0
-    markets_quoted: set = field(default_factory=set)
+class MarketMakerEngine:
+    """Stateful market maker with inventory tracking."""
 
+    def __init__(self) -> None:
+        self.inventories: dict[str, MMInventory] = {}
 
-class MarketMakerStrategy:
-    """
-    Two-sided market making on Polymarket.
-    Posts limit orders at bid and ask, capturing the spread.
-    Airdrop benefit: creates volume + liquidity on many markets.
-    """
+    def _get_inventory(self, market_id: str) -> MMInventory:
+        if market_id not in self.inventories:
+            self.inventories[market_id] = MMInventory(market_id=market_id)
+        return self.inventories[market_id]
 
-    def __init__(self):
-        self.min_spread = settings.mm_spread_min
-        self.order_size = settings.mm_order_size
-        self.stats = MMStats()
-        self.name = "market_maker"
-        logger.info(f"[MM] Initialized: min_spread={self.min_spread:.2%} size=${self.order_size}")
+    def run(self, markets: list[dict], risk: RiskManager) -> list[MMSignal]:
+        signals: list[MMSignal] = []
+        spread_pct = settings.MM_SPREAD_PCT
 
-    def scan(self, markets: list[dict]) -> list[MMQuote]:
-        quotes = []
         for m in markets:
-            yes = m.get("yes_price", 0.5)
-            no = m.get("no_price", 0.5)
-            spread = m.get("spread", abs(1.0 - yes - no))
-            volume = m.get("volume", 0)
-
-            if spread < self.min_spread:
-                continue
-            if volume < 1000:
+            prices = m.get("outcomePrices", [])
+            if len(prices) < 2:
                 continue
 
-            mid = (yes + no) / 2
-            half_spread = spread / 2 * 0.8
+            mid_price = float(prices[0])
+            market_id = m.get("id", "unknown")
+            inv = self._get_inventory(market_id)
 
-            quote = MMQuote(
-                market_id=m["condition_id"],
-                question=m.get("question", ""),
-                bid_price=round(mid - half_spread, 4),
-                ask_price=round(mid + half_spread, 4),
-                size=self.order_size,
-                mid_price=mid,
-                expected_spread=spread,
+            # Skew quotes based on inventory to reduce risk
+            inventory_skew = -inv.net_position * 0.002  # push price away from heavy side
+            bid_price = mid_price - (spread_pct / 2) + inventory_skew
+            ask_price = mid_price + (spread_pct / 2) + inventory_skew
+
+            bid_price = max(0.01, min(0.99, bid_price))
+            ask_price = max(0.01, min(0.99, ask_price))
+
+            # Simulate fill probability — wider spread = less fills
+            bid_fill_prob = max(0.1, 0.5 - spread_pct * 5)
+            ask_fill_prob = max(0.1, 0.5 - spread_pct * 5)
+
+            bid_filled = random.random() < bid_fill_prob
+            ask_filled = random.random() < ask_fill_prob
+
+            if not bid_filled and not ask_filled:
+                continue
+
+            # Size via Kelly
+            size = risk.kelly_bet_size(win_prob=0.52, win_payout=spread_pct, loss_payout=0.05)
+            if size < 0.25:
+                size = 0.25  # minimum quote size
+
+            if not risk.can_open_position(market_id, size):
+                continue
+
+            pnl = 0.0
+
+            if bid_filled:
+                # We bought — adverse selection risk
+                adverse = random.gauss(0, 0.015)  # can move against us
+                fill_price = bid_price + abs(random.gauss(0, 0.003))  # slippage on buy = pay more
+                inv.net_position += size
+                inv.total_bought += size
+                inv.avg_buy_price = fill_price
+                pnl -= adverse * size  # adverse selection cost
+                inv.fills.append({"side": "buy", "price": fill_price, "size": size})
+                risk.record_position(market_id, size)
+
+            if ask_filled:
+                # We sold
+                adverse = random.gauss(0, 0.015)
+                fill_price = ask_price - abs(random.gauss(0, 0.003))  # slippage on sell = receive less
+                inv.net_position -= size
+                inv.total_sold += size
+                inv.avg_sell_price = fill_price
+                pnl -= adverse * size
+                inv.fills.append({"side": "sell", "price": fill_price, "size": size})
+                risk.record_position(market_id, -size)
+
+            # Spread capture when both sides fill
+            if bid_filled and ask_filled:
+                spread_capture = (ask_price - bid_price) * size
+                pnl += spread_capture
+
+            # Inventory risk penalty — larger inventory = more risk
+            inventory_cost = abs(inv.net_position) * 0.005 * random.uniform(0.5, 2.0)
+            pnl -= inventory_cost
+
+            inv.realized_pnl += pnl
+            risk.update_equity(pnl)
+
+            signals.append(
+                MMSignal(
+                    market_id=market_id,
+                    market_question=m.get("question", ""),
+                    bid_price=round(bid_price, 4),
+                    ask_price=round(ask_price, 4),
+                    spread=round(ask_price - bid_price, 4),
+                    bid_filled=bid_filled,
+                    ask_filled=ask_filled,
+                    fill_size=round(size, 2),
+                    pnl=round(pnl, 4),
+                    inventory_after=round(inv.net_position, 2),
+                )
             )
-            quotes.append(quote)
-            self.stats.markets_quoted.add(m["condition_id"])
 
-        self.stats.quotes_posted += len(quotes)
-        if quotes:
-            logger.info(f"[MM] Generated {len(quotes)} quotes across {len(self.stats.markets_quoted)} markets")
-        return quotes
-
-    def generate_orders(self, quote: MMQuote) -> list[dict]:
-        return [
-            {
-                "market_id": quote.market_id,
-                "question": quote.question,
-                "side": "BUY",
-                "price": quote.bid_price,
-                "size": quote.size,
-                "order_type": "LIMIT",
-                "strategy": "market_maker",
-                "expected_spread": quote.expected_spread,
-            },
-            {
-                "market_id": quote.market_id,
-                "question": quote.question,
-                "side": "SELL",
-                "price": quote.ask_price,
-                "size": quote.size,
-                "order_type": "LIMIT",
-                "strategy": "market_maker",
-                "expected_spread": quote.expected_spread,
-            },
-        ]
-
-    def record_fill(self, spread: float):
-        self.stats.fills += 1
-        self.stats.spread_captured += spread
-        self.stats.orders_placed += 2
-
-    def get_stats(self) -> dict:
-        return {
-            "quotes_posted": self.stats.quotes_posted,
-            "orders_placed": self.stats.orders_placed,
-            "fills": self.stats.fills,
-            "spread_captured": round(self.stats.spread_captured, 4),
-            "markets_quoted": len(self.stats.markets_quoted),
-        }
+        return signals
