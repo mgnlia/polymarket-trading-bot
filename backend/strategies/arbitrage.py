@@ -39,7 +39,6 @@ class ArbitrageScanner:
         opps = []
         tasks = []
         for market in markets[:30]:  # limit to 30 markets per scan
-            cond_id = market.get("conditionId", "")
             tokens = market.get("tokens", [])
             if len(tokens) < 2:
                 continue
