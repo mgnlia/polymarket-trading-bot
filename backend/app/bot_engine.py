@@ -8,11 +8,11 @@ from datetime import datetime
 from typing import Optional
 
 from .config import settings
-from .strategies import ArbitrageStrategy, MarketMakerStrategy, MomentumStrategy
+from .strategies import scan_arb_opportunities, MarketMakerEngine, run_momentum
 from .executor import OrderExecutor
 from .risk import RiskManager
 from .airdrop import AirdropOptimizer
-from .market_scanner import refresh_markets, get_cached_markets
+from .market_scanner import refresh_markets
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +46,7 @@ class BotEngine:
     """
 
     def __init__(self):
-        self.arb = ArbitrageStrategy()
-        self.mm = MarketMakerStrategy()
-        self.momentum = MomentumStrategy()
+        self.mm_engine = MarketMakerEngine()
         self.executor = OrderExecutor()
         self.risk = RiskManager()
         self.airdrop = AirdropOptimizer()
@@ -61,12 +59,16 @@ class BotEngine:
         self._markets_scanned = 0
         self._trades: list[dict] = []
 
-        self.logs.append("INFO", "🚀 Bot engine initialized")
-        self.logs.append(
-            "INFO",
-            f"Mode: {'SIMULATION' if settings.simulation_mode else 'LIVE'} | "
-            f"Strategies: ARB + MM + Momentum"
-        )
+        # Per-strategy stats
+        self._arb_trades = 0
+        self._arb_pnl = 0.0
+        self._mm_trades = 0
+        self._mm_pnl = 0.0
+        self._mom_trades = 0
+        self._mom_pnl = 0.0
+
+        mode = "SIMULATION" if settings.simulation_mode else "LIVE"
+        self.logs.append("INFO", f"Bot engine initialized | Mode: {mode} | Strategies: ARB + MM + Momentum")
         logger.info("[Bot] Engine initialized")
 
     @property
@@ -83,7 +85,7 @@ class BotEngine:
         self._running = True
         self._paused = False
         self._task = asyncio.create_task(self._run_loop())
-        self.logs.append("SUCCESS", "▶ Bot started — running all strategies")
+        self.logs.append("SUCCESS", "Bot started — running all strategies")
         logger.info("[Bot] Started")
 
     def stop(self):
@@ -92,26 +94,20 @@ class BotEngine:
         if self._task:
             self._task.cancel()
             self._task = None
-        self.logs.append("INFO", "⏹ Bot stopped")
+        self.logs.append("INFO", "Bot stopped")
         logger.info("[Bot] Stopped")
 
     def pause(self):
         self._paused = not self._paused
         status = "paused" if self._paused else "resumed"
-        self.logs.append("INFO", f"⏸ Bot {status}")
+        self.logs.append("INFO", f"Bot {status}")
         logger.info(f"[Bot] {status.capitalize()}")
 
     async def run_cycle_once(self):
         await self._cycle()
 
-    async def scan_markets(self):
-        markets = await refresh_markets(force=True)
-        self._markets_scanned = len(markets)
-        self.logs.append("INFO", f"🔍 Scanned {len(markets)} markets")
-        return markets
-
     async def _run_loop(self):
-        self.logs.append("INFO", f"⏱ Cycle interval: {settings.cycle_interval}s")
+        self.logs.append("INFO", f"Cycle interval: {settings.cycle_interval}s")
         while self._running:
             if not self._paused:
                 try:
@@ -124,7 +120,7 @@ class BotEngine:
     async def _cycle(self):
         self._cycle_count += 1
         cycle_id = self._cycle_count
-        self.logs.append("INFO", f"⚡ Cycle #{cycle_id} starting")
+        self.logs.append("INFO", f"Cycle #{cycle_id} starting")
 
         markets = await refresh_markets()
         self._markets_scanned = len(markets)
@@ -139,99 +135,103 @@ class BotEngine:
 
         self.logs.append(
             "INFO",
-            f"✅ Cycle #{cycle_id} complete | "
-            f"Trades: {len(self._trades)} | "
-            f"Airdrop: {self.airdrop.overall_score():.0f}/100"
+            f"Cycle #{cycle_id} complete | Trades: {len(self._trades)} | "
+            f"Airdrop: {self.airdrop.overall_score():.0f}/100",
         )
 
     async def _run_arbitrage(self, markets: list[dict]):
-        signals = self.arb.scan(markets)
+        signals = scan_arb_opportunities(markets, self.risk)
         if not signals:
             return
         self.logs.append("SIGNAL", f"[ARB] {len(signals)} opportunities found", "arbitrage")
         for signal in signals[:3]:
-            orders = self.arb.generate_orders(signal)
-            for order in orders:
-                ok, reason = self.risk.can_trade(order["size"])
-                if not ok:
-                    self.logs.append("WARN", f"[ARB] Blocked: {reason}", "arbitrage")
-                    continue
-                result = await self.executor.place_order(order)
-                if result["status"] == "filled":
-                    self.risk.record_order_open(order["size"])
-                    self.risk.record_order_close(order["size"], result["pnl"], result["volume"])
-                    self.arb.record_trade(result["pnl"])
-                    self.airdrop.record_trade(order["market_id"], result["volume"], result["pnl"], "LIMIT")
-                    self._record_trade(result)
-                    self.logs.append(
-                        "TRADE",
-                        f"[ARB] Filled {order['side']} {order['size']:.1f} @ {result['filled_price']:.4f} pnl={result['pnl']:+.4f}",
-                        "arbitrage"
-                    )
-
-    async def _run_market_maker(self, markets: list[dict]):
-        quotes = self.mm.scan(markets)
-        if not quotes:
-            return
-        quotes = quotes[:5]
-        self.logs.append("SIGNAL", f"[MM] {len(quotes)} quotes generated", "market_maker")
-        for quote in quotes:
-            orders = self.mm.generate_orders(quote)
-            for order in orders:
-                ok, reason = self.risk.can_trade(order["size"])
-                if not ok:
-                    continue
-                result = await self.executor.place_order(order)
-                if result["status"] == "filled":
-                    self.risk.record_order_open(order["size"])
-                    self.risk.record_order_close(order["size"], result["pnl"], result["volume"])
-                    self.mm.record_fill(quote.expected_spread)
-                    self.airdrop.record_trade(order["market_id"], result["volume"], result["pnl"], "LIMIT")
-                    self._record_trade(result)
-                    self.logs.append(
-                        "TRADE",
-                        f"[MM] {order['side']} {order['size']:.1f} @ {result['filled_price']:.4f} spread={quote.expected_spread:.3f} pnl={result['pnl']:+.4f}",
-                        "market_maker"
-                    )
-
-    async def _run_momentum(self, markets: list[dict]):
-        signals = self.momentum.scan(markets)
-        if not signals:
-            return
-        signals = signals[:2]
-        self.logs.append("SIGNAL", f"[MOM] {len(signals)} signals", "momentum")
-        for signal in signals:
-            order = self.momentum.generate_order(signal)
-            ok, reason = self.risk.can_trade(order["size"])
-            if not ok:
-                self.logs.append("WARN", f"[MOM] Blocked: {reason}", "momentum")
-                continue
+            order = {
+                "market_id": signal.market_id,
+                "question": signal.market_question,
+                "side": signal.side,
+                "size": signal.size_usd,
+                "price": signal.yes_price if signal.side == "buy_yes" else signal.no_price,
+                "order_type": "LIMIT",
+                "strategy": "arbitrage",
+            }
             result = await self.executor.place_order(order)
             if result["status"] == "filled":
-                self.risk.record_order_open(order["size"])
-                self.risk.record_order_close(order["size"], result["pnl"], result["volume"])
-                correct = result["pnl"] > 0
-                self.momentum.record_trade(correct, result["pnl"])
-                self.airdrop.record_trade(order["market_id"], result["volume"], result["pnl"], "LIMIT")
-                self._record_trade(result)
+                self.airdrop.record_trade(signal.market_id, result["volume"], signal.actual_pnl, "LIMIT")
+                self._arb_trades += 1
+                self._arb_pnl += signal.actual_pnl
+                self._record_trade(result, signal.actual_pnl)
                 self.logs.append(
                     "TRADE",
-                    f"[MOM] {signal.direction} {order['size']:.1f} @ {result['filled_price']:.4f} conf={signal.confidence:.2f} pnl={result['pnl']:+.4f}",
-                    "momentum"
+                    f"[ARB] {signal.side} ${signal.size_usd:.1f} dev={signal.deviation:.3f} pnl={signal.actual_pnl:+.4f}",
+                    "arbitrage",
                 )
 
-    def _record_trade(self, result: dict):
+    async def _run_market_maker(self, markets: list[dict]):
+        quotes = self.mm_engine.run(markets, self.risk)
+        if not quotes:
+            return
+        self.logs.append("SIGNAL", f"[MM] {len(quotes)} quotes generated", "market_maker")
+        for quote in quotes[:5]:
+            order = {
+                "market_id": quote.market_id,
+                "question": quote.market_question,
+                "side": "bid" if quote.bid_filled else "ask",
+                "size": quote.fill_size,
+                "price": quote.bid_price if quote.bid_filled else quote.ask_price,
+                "order_type": "LIMIT",
+                "strategy": "market_maker",
+            }
+            result = await self.executor.place_order(order)
+            if result["status"] == "filled":
+                self.airdrop.record_trade(quote.market_id, result["volume"], quote.pnl, "LIMIT")
+                self._mm_trades += 1
+                self._mm_pnl += quote.pnl
+                self._record_trade(result, quote.pnl)
+                self.logs.append(
+                    "TRADE",
+                    f"[MM] spread={quote.spread:.3f} size=${quote.fill_size:.1f} pnl={quote.pnl:+.4f}",
+                    "market_maker",
+                )
+
+    async def _run_momentum(self, markets: list[dict]):
+        signals = run_momentum(markets, self.risk)
+        if not signals:
+            return
+        self.logs.append("SIGNAL", f"[MOM] {len(signals)} signals", "momentum")
+        for signal in signals[:2]:
+            order = {
+                "market_id": signal.market_id,
+                "question": signal.market_question,
+                "side": "buy" if signal.direction == "long" else "sell",
+                "size": signal.size_usd,
+                "price": signal.entry_price,
+                "order_type": "LIMIT",
+                "strategy": "momentum",
+            }
+            result = await self.executor.place_order(order)
+            if result["status"] == "filled":
+                self.airdrop.record_trade(signal.market_id, result["volume"], signal.pnl, "LIMIT")
+                self._mom_trades += 1
+                self._mom_pnl += signal.pnl
+                self._record_trade(result, signal.pnl)
+                self.logs.append(
+                    "TRADE",
+                    f"[MOM] {signal.direction} ${signal.size_usd:.1f} chg={signal.price_change_pct:+.1f}% pnl={signal.pnl:+.4f}",
+                    "momentum",
+                )
+
+    def _record_trade(self, result: dict, pnl: float):
         self._trades.append({
             "id": result.get("order_id", str(uuid.uuid4())),
-            "market_id": result["market_id"],
+            "market_id": result.get("market_id", ""),
             "question": result.get("question", ""),
-            "side": result["side"],
-            "size": result["size"],
+            "side": result.get("side", ""),
+            "size": result.get("size", 0),
             "price": result.get("filled_price", 0),
-            "pnl": result["pnl"],
-            "strategy": result["strategy"],
-            "status": result["status"],
-            "timestamp": result["timestamp"],
+            "pnl": round(pnl, 4),
+            "strategy": result.get("strategy", ""),
+            "status": result.get("status", ""),
+            "timestamp": result.get("timestamp", datetime.utcnow().isoformat()),
         })
         if len(self._trades) > 500:
             self._trades = self._trades[-500:]
@@ -250,12 +250,11 @@ class BotEngine:
             "markets_scanned": self._markets_scanned,
             "total_trades": len(self._trades),
             "strategies": {
-                "arbitrage": self.arb.get_stats(),
-                "market_maker": self.mm.get_stats(),
-                "momentum": self.momentum.get_stats(),
+                "arbitrage": {"trades": self._arb_trades, "pnl": round(self._arb_pnl, 4)},
+                "market_maker": {"trades": self._mm_trades, "pnl": round(self._mm_pnl, 4)},
+                "momentum": {"trades": self._mom_trades, "pnl": round(self._mom_pnl, 4)},
             },
             "risk": self.risk.get_status(),
-            "executor": self.executor.get_stats(),
             "airdrop_score": self.airdrop.overall_score(),
         }
 
