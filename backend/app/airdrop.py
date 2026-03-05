@@ -73,18 +73,22 @@ class AirdropOptimizer:
 
     def overall_score(self) -> float:
         return (
-            self.score_diversity() * 0.30 +
-            self.score_volume() * 0.30 +
-            self.score_profitability() * 0.20 +
-            self.score_liquidity() * 0.20
+            self.score_diversity() * 0.30
+            + self.score_volume() * 0.30
+            + self.score_profitability() * 0.20
+            + self.score_liquidity() * 0.20
         )
 
     def get_tier(self) -> str:
         score = self.overall_score()
-        if score >= 80: return "Diamond"
-        elif score >= 60: return "Gold"
-        elif score >= 40: return "Silver"
-        else: return "Bronze"
+        if score >= 80:
+            return "Diamond"
+        elif score >= 60:
+            return "Gold"
+        elif score >= 40:
+            return "Silver"
+        else:
+            return "Bronze"
 
     def get_report(self) -> dict:
         return {
@@ -127,5 +131,5 @@ class AirdropOptimizer:
         if self.score_profitability() < 40:
             recs.append("Win rate below target — review momentum strategy thresholds")
         if not recs:
-            recs.append("🎉 Excellent airdrop positioning! Keep trading.")
+            recs.append("Excellent airdrop positioning! Keep trading.")
         return recs
