@@ -41,11 +41,12 @@ def scan_arb_opportunities(markets: list[dict], risk: RiskManager) -> list[ArbSi
     threshold = settings.arb_threshold + (2 * TAKER_FEE)
 
     for m in markets:
-        prices = m.get("outcomePrices", [])
-        if len(prices) < 2:
-            continue
-        yes_p = float(prices[0])
-        no_p = float(prices[1])
+        # Support both market formats
+        yes_p = float(m.get("yes_price") or m.get("outcomePrices", [0.5])[0])
+        no_p = float(m.get("no_price") or (m.get("outcomePrices", [0.5, 0.5]) + [0.5])[1])
+        market_id = m.get("condition_id") or m.get("id", "unknown")
+        question = m.get("question", "")
+
         total = yes_p + no_p
         deviation = abs(total - 1.0)
 
@@ -64,8 +65,6 @@ def scan_arb_opportunities(markets: list[dict], risk: RiskManager) -> list[ArbSi
         can_trade, _ = risk.can_trade(size)
         if not can_trade:
             continue
-
-        market_id = m.get("id", "unknown")
 
         # --- Realistic execution simulation ---
         # Slippage: Gaussian noise (can make arb unprofitable)
@@ -87,7 +86,7 @@ def scan_arb_opportunities(markets: list[dict], risk: RiskManager) -> list[ArbSi
         signals.append(
             ArbSignal(
                 market_id=market_id,
-                market_question=m.get("question", ""),
+                market_question=question,
                 yes_price=yes_p,
                 no_price=no_p,
                 deviation=deviation,
