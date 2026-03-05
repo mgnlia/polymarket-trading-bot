@@ -4,16 +4,16 @@ Polymarket Trading Bot — FastAPI Backend
 import asyncio
 import json
 import logging
-import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse  # noqa: F401
 from sse_starlette.sse import EventSourceResponse
 
+from .auth import require_api_key
 from .config import settings
 from .bot_engine import bot
 from .market_scanner import refresh_markets, get_cached_markets
@@ -55,14 +55,14 @@ app.add_middleware(
 )
 
 
-# ─── Health ──────────────────────────────────────────────────────────────────
+# ─── Health (no auth) ────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
-# ─── Status ──────────────────────────────────────────────────────────────────
+# ─── Status (no auth — dashboard reads this) ─────────────────────────────────
 
 @app.get("/status")
 async def get_status():
@@ -74,44 +74,47 @@ async def get_status():
     }
 
 
-# ─── Bot Controls ─────────────────────────────────────────────────────────────
+# ─── Bot Controls (auth required) ────────────────────────────────────────────
 
 @app.post("/bot/start")
-async def start_bot():
+async def start_bot(_: str = Depends(require_api_key)):
     bot.start()
     return {"ok": True, "message": "Bot started"}
 
 
 @app.post("/bot/stop")
-async def stop_bot():
+async def stop_bot(_: str = Depends(require_api_key)):
     bot.stop()
     return {"ok": True, "message": "Bot stopped"}
 
 
 @app.post("/bot/pause")
-async def pause_bot():
+async def pause_bot(_: str = Depends(require_api_key)):
     bot.pause()
     return {"ok": True, "paused": bot.paused}
 
 
 @app.post("/bot/cycle")
-async def run_cycle():
+async def run_cycle(_: str = Depends(require_api_key)):
     """Manually trigger one trading cycle."""
     await bot.run_cycle_once()
     return {"ok": True, "message": "Cycle complete", "trades": len(bot.get_trades(10))}
 
 
 @app.post("/bot/scan")
-async def scan_markets():
+async def scan_markets(_: str = Depends(require_api_key)):
     """Force refresh market data."""
     markets = await bot.scan_markets()
     return {"ok": True, "markets_found": len(markets)}
 
 
-# ─── Data Endpoints ──────────────────────────────────────────────────────────
+# ─── Data Endpoints (auth required) ──────────────────────────────────────────
 
 @app.get("/trades")
-async def get_trades(limit: int = Query(50, ge=1, le=500)):
+async def get_trades(
+    limit: int = Query(50, ge=1, le=500),
+    _: str = Depends(require_api_key),
+):
     trades = bot.get_trades(limit)
     total_pnl = sum(t.get("pnl", 0) for t in trades)
     return {
@@ -131,17 +134,20 @@ async def get_markets(limit: int = Query(30, ge=1, le=200)):
 
 
 @app.get("/airdrop")
-async def get_airdrop():
+async def get_airdrop(_: str = Depends(require_api_key)):
     return bot.airdrop.get_report()
 
 
 @app.get("/logs")
-async def get_logs(limit: int = Query(40, ge=1, le=200)):
+async def get_logs(
+    limit: int = Query(40, ge=1, le=200),
+    _: str = Depends(require_api_key),
+):
     logs = bot.get_logs(limit)
     return {"logs": logs, "count": len(logs)}
 
 
-# ─── SSE Stream ──────────────────────────────────────────────────────────────
+# ─── SSE Stream (no auth — dashboard polling) ────────────────────────────────
 
 async def _status_generator() -> AsyncGenerator[dict, None]:
     """Generate SSE events with bot status."""
