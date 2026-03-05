@@ -60,7 +60,7 @@ class MarketMakerEngine:
 
     def run(self, markets: list[dict], risk: RiskManager) -> list[MMSignal]:
         signals: list[MMSignal] = []
-        spread_pct = settings.MM_SPREAD_PCT
+        spread_pct = settings.mm_spread_min
 
         for m in markets:
             prices = m.get("outcomePrices", [])
@@ -90,11 +90,12 @@ class MarketMakerEngine:
                 continue
 
             # Size via Kelly
-            size = risk.kelly_bet_size(win_prob=0.52, win_payout=spread_pct, loss_payout=0.05)
+            size = risk.kelly_size(win_prob=0.52, win_pct=spread_pct, loss_pct=0.05)
             if size < 0.25:
                 size = 0.25  # minimum quote size
 
-            if not risk.can_open_position(market_id, size):
+            can_trade, _ = risk.can_trade(size)
+            if not can_trade:
                 continue
 
             pnl = 0.0
@@ -108,7 +109,7 @@ class MarketMakerEngine:
                 inv.avg_buy_price = fill_price
                 pnl -= adverse * size  # adverse selection cost
                 inv.fills.append({"side": "buy", "price": fill_price, "size": size})
-                risk.record_position(market_id, size)
+                risk.record_order_open(size)
 
             if ask_filled:
                 # We sold
@@ -119,7 +120,7 @@ class MarketMakerEngine:
                 inv.avg_sell_price = fill_price
                 pnl -= adverse * size
                 inv.fills.append({"side": "sell", "price": fill_price, "size": size})
-                risk.record_position(market_id, -size)
+                risk.record_order_open(size)
 
             # Spread capture when both sides fill
             if bid_filled and ask_filled:
@@ -131,7 +132,9 @@ class MarketMakerEngine:
             pnl -= inventory_cost
 
             inv.realized_pnl += pnl
-            risk.update_equity(pnl)
+            # Record close with realized pnl
+            close_size = size * (2 if bid_filled and ask_filled else 1)
+            risk.record_order_close(close_size, pnl=pnl, volume=close_size * mid_price)
 
             signals.append(
                 MMSignal(
