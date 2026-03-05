@@ -33,6 +33,7 @@ class MomentumSignal:
 def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]:
     """Scan for momentum signals and simulate entries/exits."""
     signals: list[MomentumSignal] = []
+    entry_threshold = 0.05  # 5% price move triggers signal
 
     for m in markets:
         prices = m.get("outcomePrices", [])
@@ -49,7 +50,7 @@ def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]
 
         abs_change = abs(price_change)
 
-        if abs_change < settings.MOMENTUM_ENTRY_THRESHOLD:
+        if abs_change < entry_threshold:
             continue
 
         if not volume_spike:
@@ -59,11 +60,12 @@ def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]
 
         # Kelly sizing: higher conviction for stronger moves
         win_prob = min(0.65, 0.45 + abs_change * 2)
-        size = risk.kelly_bet_size(win_prob, win_payout=abs_change * 3, loss_payout=1.0)
+        size = risk.kelly_size(win_prob=win_prob, win_pct=abs_change * 3, loss_pct=1.0)
         if size < 0.50:
             continue
 
-        if not risk.can_open_position(market_id, size):
+        can_trade, _ = risk.can_trade(size)
+        if not can_trade:
             continue
 
         # Simulate trade outcome — momentum can REVERSE (whipsaw)
@@ -86,8 +88,8 @@ def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]
         # Transaction costs
         pnl -= size * 0.005  # taker fee
 
-        risk.record_position(market_id, size if direction == "long" else -size)
-        risk.update_equity(pnl)
+        risk.record_order_open(size)
+        risk.record_order_close(size, pnl=pnl, volume=size * current_price)
 
         signals.append(
             MomentumSignal(
