@@ -12,7 +12,6 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from ..config import settings
 from ..risk import RiskManager
 
 
@@ -36,12 +35,10 @@ def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]
     entry_threshold = 0.05  # 5% price move triggers signal
 
     for m in markets:
-        prices = m.get("outcomePrices", [])
-        if len(prices) < 2:
-            continue
-
-        current_price = float(prices[0])
-        market_id = m.get("id", "unknown")
+        # Support both market formats
+        current_price = float(m.get("yes_price") or (m.get("outcomePrices", [0.5]) + [0.5])[0])
+        market_id = m.get("condition_id") or m.get("id", "unknown")
+        question = m.get("question", "")
         volume = float(m.get("volume", 0))
 
         # Simulate recent price change (in real mode would compare to historical)
@@ -69,7 +66,6 @@ def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]
             continue
 
         # Simulate trade outcome — momentum can REVERSE (whipsaw)
-        # True continuation probability decreases with move size (mean reversion)
         continuation_prob = max(0.3, 0.6 - abs_change)
         continues = random.random() < continuation_prob
 
@@ -77,11 +73,9 @@ def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]
         entry_price = current_price + (entry_slippage if direction == "long" else -entry_slippage)
 
         if continues:
-            # Momentum continues — profit with noise
             exit_move = abs(random.gauss(abs_change * 0.5, abs_change * 0.3))
             pnl = exit_move * size
         else:
-            # Whipsaw / reversal — LOSS
             reversal = abs(random.gauss(abs_change * 0.4, abs_change * 0.5))
             pnl = -(reversal * size + entry_slippage * size)
 
@@ -94,7 +88,7 @@ def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]
         signals.append(
             MomentumSignal(
                 market_id=market_id,
-                market_question=m.get("question", ""),
+                market_question=question,
                 direction=direction,
                 entry_price=round(entry_price, 4),
                 current_price=round(current_price, 4),
