@@ -1,5 +1,6 @@
 """Configuration with environment variable support."""
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from typing import Optional, List
 
 
@@ -44,8 +45,23 @@ class Settings(BaseSettings):
     # DB
     db_url: str = "sqlite+aiosqlite:///./data/polymarket.db"
 
-    # CORS
+    # CORS — accepts JSON list or comma-separated string
     cors_origins: List[str] = ["*"]
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v):
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            # Try JSON first
+            if v.startswith("["):
+                import json
+                return json.loads(v)
+            # Comma-separated
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
 
     class Config:
         env_file = ".env"
