@@ -82,9 +82,6 @@ def run_momentum(markets: list[dict], risk: RiskManager) -> list[MomentumSignal]
         # Transaction costs
         pnl -= size * 0.005  # taker fee
 
-        risk.record_order_open(size)
-        risk.record_order_close(size, pnl=pnl, volume=size * current_price)
-
         signals.append(
             MomentumSignal(
                 market_id=market_id,
