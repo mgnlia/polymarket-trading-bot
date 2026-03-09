@@ -80,9 +80,6 @@ def scan_arb_opportunities(markets: list[dict], risk: RiskManager) -> list[ArbSi
         # Actual PnL includes slippage and fees — CAN BE NEGATIVE
         actual_pnl = raw_profit - fee_cost - (slippage * effective_size)
 
-        risk.record_order_open(effective_size)
-        risk.record_order_close(effective_size, pnl=actual_pnl, volume=effective_size)
-
         signals.append(
             ArbSignal(
                 market_id=market_id,
