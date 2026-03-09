@@ -58,17 +58,30 @@ class MarketMakerEngine:
             self.inventories[market_id] = MMInventory(market_id=market_id)
         return self.inventories[market_id]
 
+    def _extract_yes_no_prices(self, market: dict) -> tuple[float, float] | None:
+        yes_price = market.get("yes_price")
+        no_price = market.get("no_price")
+        if yes_price is not None and no_price is not None:
+            return float(yes_price), float(no_price)
+
+        prices = market.get("outcomePrices", [])
+        if len(prices) < 2:
+            return None
+
+        return float(prices[0]), float(prices[1])
+
     def run(self, markets: list[dict], risk: RiskManager) -> list[MMSignal]:
         signals: list[MMSignal] = []
         spread_pct = settings.mm_spread_min
 
         for m in markets:
-            prices = m.get("outcomePrices", [])
-            if len(prices) < 2:
+            parsed_prices = self._extract_yes_no_prices(m)
+            if parsed_prices is None:
                 continue
 
-            mid_price = float(prices[0])
-            market_id = m.get("id", "unknown")
+            yes_price, _ = parsed_prices
+            mid_price = yes_price
+            market_id = m.get("condition_id") or m.get("id", "unknown")
             inv = self._get_inventory(market_id)
 
             # Skew quotes based on inventory to reduce risk
@@ -109,7 +122,6 @@ class MarketMakerEngine:
                 inv.avg_buy_price = fill_price
                 pnl -= adverse * size  # adverse selection cost
                 inv.fills.append({"side": "buy", "price": fill_price, "size": size})
-                risk.record_order_open(size)
 
             if ask_filled:
                 # We sold
@@ -120,7 +132,6 @@ class MarketMakerEngine:
                 inv.avg_sell_price = fill_price
                 pnl -= adverse * size
                 inv.fills.append({"side": "sell", "price": fill_price, "size": size})
-                risk.record_order_open(size)
 
             # Spread capture when both sides fill
             if bid_filled and ask_filled:
@@ -132,9 +143,6 @@ class MarketMakerEngine:
             pnl -= inventory_cost
 
             inv.realized_pnl += pnl
-            # Record close with realized pnl
-            close_size = size * (2 if bid_filled and ask_filled else 1)
-            risk.record_order_close(close_size, pnl=pnl, volume=close_size * mid_price)
 
             signals.append(
                 MMSignal(
